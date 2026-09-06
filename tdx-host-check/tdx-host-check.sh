@@ -279,7 +279,7 @@ if [ "$BMC" = "internal" ]; then
     BMC="169.254.0.17"
     echo "using $LINK_IF, BMC at $BMC" >>"$DIR/B-internal-link.txt"
     ip -4 -o addr show dev "$LINK_IF" >>"$DIR/B-internal-link.txt" 2>&1
-    if curl -sk --max-time 10 -o /dev/null "https://$BMC/redfish/v1/" 2>>"$DIR/B-internal-link.txt"; then
+    if curl -skL --max-time 10 -o /dev/null "https://$BMC/redfish/v1/" 2>>"$DIR/B-internal-link.txt"; then
       say "B  BMC answers at $BMC over $LINK_IF"
     else
       say "B  the BMC does not answer at $BMC over $LINK_IF. Continuing, the Redfish files will show the error."
@@ -290,17 +290,17 @@ fi
 if [ -n "$BMC" ]; then
   if [ -z "$BMC_USER" ]; then read -r -p "BMC user: " BMC_USER; fi
   if [ -z "${BMC_PASS:-}" ]; then read -r -s -p "BMC password (not saved): " BMC_PASS; echo; fi
-  CURL=(curl -sk --max-time 30 -u "$BMC_USER:$BMC_PASS")
+  CURL=(curl -skL --max-time 30 -u "$BMC_USER:$BMC_PASS")
   jget() { "${CURL[@]}" "https://$BMC$1" | python3 -m json.tool 2>/dev/null; }
-  code=$("${CURL[@]}" -o /dev/null -w '%{http_code}' "https://$BMC/redfish/v1/Systems/")
-  echo "GET /redfish/v1/Systems/ as $BMC_USER: HTTP $code" >>"$DIR/B-internal-link.txt"
+  code=$("${CURL[@]}" -o /dev/null -w '%{http_code}' "https://$BMC/redfish/v1/Systems")
+  echo "GET /redfish/v1/Systems as $BMC_USER: HTTP $code" >>"$DIR/B-internal-link.txt"
   case "$code" in
     401|403) say "B  the BMC at $BMC rejected the login for user $BMC_USER (HTTP $code). Check the account and password. The BIOS files below will only contain that error.";;
     000) say "B  no HTTPS answer from $BMC. Check the address and the route.";;
     2*) say "B  logged in to the BMC at $BMC as $BMC_USER";;
     *) say "B  the BMC at $BMC answered HTTP $code to the Systems request";;
   esac
-  jget /redfish/v1/Systems/ >"$DIR/B0-systems.json"
+  jget /redfish/v1/Systems >"$DIR/B0-systems.json"
   if [ -z "$SYSTEM_ID" ]; then
     SYSTEM_ID=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['Members'][0]['@odata.id'].rstrip('/').split('/')[-1])" "$DIR/B0-systems.json" 2>/dev/null)
   fi
@@ -312,8 +312,8 @@ if [ -n "$BMC" ]; then
     say "B  could not read the Systems collection from $BMC. Check address, account and network. Saved what came back."
   fi
   jget /redfish/v1/UpdateService/FirmwareInventory/HostBIOS_0 >"$DIR/B3-sbios-version.json"
-  [ -s "$DIR/B3-sbios-version.json" ] || jget /redfish/v1/UpdateService/FirmwareInventory/ >"$DIR/B3-firmware-inventory.json"
-  jget /redfish/v1/Registries/ >"$DIR/B4-registries.json"
+  [ -s "$DIR/B3-sbios-version.json" ] || jget /redfish/v1/UpdateService/FirmwareInventory >"$DIR/B3-firmware-inventory.json"
+  jget /redfish/v1/Registries >"$DIR/B4-registries.json"
   REG=$(python3 -c "import json,sys;m=json.load(open(sys.argv[1]))['Members'];print([x['@odata.id'] for x in m if 'BiosAttributeRegistry' in x['@odata.id']][0])" "$DIR/B4-registries.json" 2>/dev/null)
   if [ -n "$REG" ]; then
     jget "$REG" >"$DIR/B5-registry-index.json"
