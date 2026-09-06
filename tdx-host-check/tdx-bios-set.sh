@@ -41,6 +41,12 @@
 #   --yes, -y           Answer yes to every question.
 #   -h, --help          This text.
 #
+# Before anything is sent, the request is checked against the firmware's
+# own BIOS attribute registry: every attribute must exist and be writable,
+# every value must be one the firmware accepts, and for --enable the
+# preconditions (X2APIC on, NUMA on, 46-bit address limit off) must hold.
+# Only then does it ask for confirmation. --dry-run stops after the check.
+#
 # Every run saves the current settings before any change, the request body,
 # the BMC's response and the pending settings after, in one folder, zipped.
 # To revert, run --disable and reboot again. If the node does not boot,
@@ -65,7 +71,7 @@ while [ $# -gt 0 ]; do
     --dry-run) DRY=1; shift;;
     --out) OUT="$2"; shift 2;;
     --yes|-y) YES=1; shift;;
-    -h|--help) sed -n '2,50p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
+    -h|--help) sed -n '2,56p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
     *) echo "unknown option: $1" >&2; exit 2;;
   esac
 done
@@ -180,6 +186,58 @@ esac
 printf '%s\n' "$BODY" >"$DIR/request-body.json"
 say "--- request: PATCH $BIOS/SD"
 say "$BODY"
+
+# ------------------------------------------- check against the registry
+# Before anything is sent: does this firmware know every attribute in the
+# request, is it writable, and is every value one it accepts. Also the
+# preconditions the TDX items depend on. Any failure stops the run.
+say "--- checking the request against the BIOS attribute registry"
+REG=$(rf_get /redfish/v1/Registries | python3 -c "import json,sys;m=json.load(sys.stdin)['Members'];print([x['@odata.id'] for x in m if 'BiosAttributeRegistry' in x['@odata.id']][0])" 2>/dev/null)
+LOC=""; [ -n "$REG" ] && LOC=$(rf_get "$REG" | python3 -c "import json,sys;print(json.load(sys.stdin)['Location'][0]['Uri'])" 2>/dev/null)
+[ -n "$LOC" ] && rf_get "$LOC" >"$DIR/registry.json"
+[ -s "$DIR/registry.json" ] || { say "could not read the BIOS attribute registry from the BMC. Not sending anything without it."; exit 1; }
+python3 - "$DIR/registry.json" "$DIR/before-current.json" "$DIR/request-body.json" "$ACTION" <<'PY' | tee -a "$LOG"
+import json, sys
+reg = json.load(open(sys.argv[1]))
+cur = json.load(open(sys.argv[2])).get('Attributes', {})
+req = json.load(open(sys.argv[3]))['Attributes']
+action = sys.argv[4]
+ents = {e['AttributeName']: e for e in reg.get('RegistryEntries', {}).get('Attributes', [])}
+bad = 0
+print('%-24s %-22s %-22s %s' % ('attribute', 'current', 'requested', 'check'))
+for k, v in req.items():
+    e = ents.get(k)
+    if e is None:
+        note, ok = 'NOT IN THIS FIRMWARE', False
+    elif e.get('ReadOnly'):
+        note, ok = 'READ-ONLY', False
+    elif e.get('Type') == 'Enumeration':
+        allowed = [x.get('ValueName') for x in e.get('Value', [])]
+        ok = v in allowed
+        note = 'ok, one of ' + '/'.join(map(str, allowed)) if ok else 'VALUE NOT ALLOWED, use one of ' + '/'.join(map(str, allowed))
+    elif e.get('Type') == 'Integer':
+        lo, hi = e.get('LowerBound'), e.get('UpperBound')
+        ok = isinstance(v, int) and (lo is None or v >= lo) and (hi is None or v <= hi)
+        note = 'ok, %s to %s' % (lo, hi) if ok else 'VALUE OUT OF RANGE %s to %s' % (lo, hi)
+    else:
+        ok, note = True, 'ok, type %s' % e.get('Type')
+    if ok and cur.get(k) == v:
+        note += ', already set'
+    bad += 0 if ok else 1
+    print('%-24s %-22s %-22s %s' % (k, cur.get(k, '<absent>'), v, note))
+if action == 'enable':
+    print('--- preconditions')
+    for k, want in (('ProcessorX2apic', 'Enable'), ('NumaEn', 'Enable'), ('CpuPaLimit', 'Disable')):
+        have = cur.get(k, '<absent>')
+        ok = have == want
+        bad += 0 if ok else 1
+        print('%-24s %-22s %-22s %s' % (k, have, want, 'ok' if ok else 'MUST BE %s FIRST' % want))
+print('registry: %d attributes, %d problem(s) with this request' % (len(ents), bad))
+sys.exit(1 if bad else 0)
+PY
+CHECK=${PIPESTATUS[0]}
+if [ "$CHECK" != 0 ]; then say "the check found problems. Nothing sent. Fix the request or the preconditions and run again."; exit 1; fi
+say "every attribute exists on this firmware, is writable, and every value is one it accepts."
 if [ "$DRY" = 1 ]; then say "dry run, nothing sent"; exit 0; fi
 say "This stages the values above. They take effect at the next boot of this node, and the first boot after enabling memory encryption and SGX takes several minutes longer than usual."
 confirm "Stage these settings on $SYSTEM_ID via $BMC?" || { say "not sent"; exit 1; }

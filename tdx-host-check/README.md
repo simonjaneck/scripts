@@ -65,6 +65,8 @@ sudo ./tdx-bios-set.sh --bmc internal --disable             # stage the revert
 sudo ./tdx-bios-set.sh --bmc internal --set PrmSgxSize=512M # one attribute of your choice
 ```
 
+Before anything is sent, the script reads the firmware's own BIOS attribute registry and checks the request against it: every attribute must exist on that firmware and be writable, every value must be one the firmware lists as allowed or inside its integer range, and for `--enable` the preconditions must already hold (Extended APIC on, NUMA on, 46-bit address limit off). It prints the check as a table, current value beside requested value, and stops with nothing sent if anything fails. Only when everything passes does it ask for confirmation. `--dry-run` stops right after the check.
+
 What to know before using it:
 
 - **A reboot is required.** These settings are programmed by the firmware during POST. Nothing changes until the node restarts, and the first boot after enabling memory encryption and SGX takes several minutes longer than usual. Drain the node first.
