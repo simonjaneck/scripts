@@ -22,9 +22,12 @@ Fetch the one file and run it. No checkout needed.
 curl -fsSL https://raw.githubusercontent.com/simonjaneck/scripts/main/tdx-host-check/tdx-host-check.sh -o tdx-host-check.sh
 chmod +x tdx-host-check.sh
 sudo ./tdx-host-check.sh
-sudo ./tdx-host-check.sh --bmc 10.0.0.5 --bmc-user admin     # with the BIOS part
+sudo ./tdx-host-check.sh --bmc internal --bmc-user admin     # with the BIOS part, over the DGX internal link
+sudo ./tdx-host-check.sh --bmc 10.0.0.5 --bmc-user admin     # with the BIOS part, over the BMC network
 sudo ./tdx-host-check.sh --label after                         # after a BIOS change
 ```
+
+`--bmc internal` uses the host-to-BMC USB network interface that DGX systems carry, named `enx<mac>`, with the BMC preconfigured at `169.254.0.17`. The node then reads its own BIOS settings without any route to the BMC network. If the interface has no link-local address yet, `169.254.0.18/16` is added for the run and removed at the end. That is documented in the DGX H100 and B200 user guides under Redfish APIs Support, Connectivity Between the Host and BMC.
 
 Or with the repository: `git clone https://github.com/simonjaneck/scripts.git && cd scripts/tdx-host-check`.
 
@@ -36,7 +39,7 @@ Output is a folder and a zip next to it, named `tdx-host-check-<host>-<label>-<t
 
 - Root, for `dmesg`, `dmidecode`, and the MSR and CPUID device files. Without root it still runs and says what it could not read.
 - `python3`, which every DGX OS and Ubuntu has. `cpuid` and `msr-tools` are used if present and are not required: the script reads `/dev/cpu/0/cpuid` and `/dev/cpu/0/msr` directly when they are missing.
-- The `msr` and `cpuid` kernel modules. If they are not loaded the script loads them, which is the one change it makes and which does not survive a reboot. `--no-modprobe` forbids it.
+- The `msr` and `cpuid` kernel modules. If they are not loaded the script loads them, which does not survive a reboot. `--no-modprobe` forbids it. With `--bmc internal` a link-local address may be added to the BMC USB interface for the run and removed afterwards. Those are the only two changes it can make.
 - `curl` for the Redfish part. The BMC password is asked for at the prompt, or taken from `BMC_PASS`, and is not written anywhere. The saved JSON does contain whatever the BMC returns, including hostnames and firmware versions.
 
 ## Reading the result

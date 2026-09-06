@@ -10,16 +10,25 @@
 # Nothing is changed on the host. The only writes are the output folder
 # and, when the msr or cpuid kernel modules are not loaded, a modprobe
 # of those two in-tree modules, which goes away at the next reboot.
-# Pass --no-modprobe to forbid even that.
+# Pass --no-modprobe to forbid even that. With --bmc internal, a
+# link-local address may be added to the BMC USB interface for the run
+# and is removed again at the end.
 #
 # Usage
 #   sudo ./tdx-host-check.sh
+#   sudo ./tdx-host-check.sh --bmc internal --bmc-user admin
 #   sudo ./tdx-host-check.sh --bmc 10.0.0.5 --bmc-user admin
 #   sudo ./tdx-host-check.sh --label after --out /tmp
 #
 # Options
-#   --bmc <host>        BMC address for the Redfish part. Password is asked
-#                       for, or taken from BMC_PASS if set. Never saved.
+#   --bmc internal      Read the BIOS over the DGX internal host-to-BMC USB
+#                       network interface (enx..., BMC at 169.254.0.17), from
+#                       the node itself. If the interface has no link-local
+#                       address yet, 169.254.0.18/16 is added for the run and
+#                       removed afterwards. The one host change this makes.
+#   --bmc <host>        BMC address for the Redfish part, from any machine
+#                       that reaches the BMC network. Password is asked for,
+#                       or taken from BMC_PASS if set. Never saved.
 #   --bmc-user <user>   BMC account. Read access is enough.
 #   --system <id>       Redfish system id if not auto-detected (e.g. DGX).
 #   --label <text>      Added to the folder name, e.g. before or after.
@@ -43,7 +52,7 @@ while [ $# -gt 0 ]; do
     --label) LABEL="$2"; shift 2;;
     --out) OUT="$2"; shift 2;;
     --no-modprobe) MODPROBE=0; shift;;
-    -h|--help) sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
+    -h|--help) sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
     *) echo "unknown option: $1" >&2; exit 2;;
   esac
 done
@@ -205,6 +214,48 @@ TME_EN=""; KEYID_BITS=""; TDX_KEYS=""; MAX_KEYS=""
 say "A6 memory encryption MSR saved"
 
 # ------------------------------------------------ B  BIOS settings via BMC
+LINK_IF=""; LINK_ADDED=0
+if [ "$BMC" = "internal" ]; then
+  # DGX systems expose the BMC on an internal USB network interface named
+  # enx<mac>, with the BMC preconfigured at 169.254.0.17. See the DGX H100 and
+  # B200 user guides, Redfish APIs Support, Connectivity Between the Host and BMC.
+  {
+    echo "--- candidate interfaces"
+    for i in /sys/class/net/enx*; do
+      [ -e "$i" ] || continue
+      n=$(basename "$i"); drv=$(readlink "$i/device/driver" 2>/dev/null | xargs -r basename)
+      echo "$n driver=${drv:-?} carrier=$(cat "$i/carrier" 2>/dev/null || echo ?) addr=$(ip -4 -o addr show dev "$n" 2>/dev/null | awk '{print $4}' | tr '\n' ' ')"
+    done
+  } >"$DIR/B-internal-link.txt" 2>&1
+  for i in /sys/class/net/enx*; do
+    [ -e "$i" ] || continue; n=$(basename "$i")
+    if ip -4 -o addr show dev "$n" 2>/dev/null | grep -q ' 169\.254\.'; then LINK_IF="$n"; break; fi
+  done
+  if [ -z "$LINK_IF" ]; then
+    for i in /sys/class/net/enx*; do
+      [ -e "$i" ] || continue; n=$(basename "$i")
+      if [ "$(cat "$i/carrier" 2>/dev/null)" = "1" ] || [ "$(cat "$i/operstate" 2>/dev/null)" = "up" ]; then LINK_IF="$n"; break; fi
+    done
+    [ -z "$LINK_IF" ] && for i in /sys/class/net/enx*; do [ -e "$i" ] && { LINK_IF=$(basename "$i"); break; }; done
+    if [ -n "$LINK_IF" ]; then
+      ip link set dev "$LINK_IF" up 2>>"$DIR/B-internal-link.txt"
+      if ip addr add 169.254.0.18/16 dev "$LINK_IF" 2>>"$DIR/B-internal-link.txt"; then
+        LINK_ADDED=1; echo "added 169.254.0.18/16 to $LINK_IF for this run" >>"$DIR/B-internal-link.txt"
+      fi
+    fi
+  fi
+  if [ -n "$LINK_IF" ]; then
+    BMC="169.254.0.17"
+    echo "using $LINK_IF, BMC at $BMC" >>"$DIR/B-internal-link.txt"
+    say "B  internal link: $LINK_IF, BMC at $BMC"
+    if ! curl -sk --max-time 10 -o /dev/null "https://$BMC/redfish/v1/" 2>>"$DIR/B-internal-link.txt"; then
+      say "B  the BMC does not answer at $BMC over $LINK_IF. Continuing, the Redfish files will show the error."
+    fi
+  else
+    say "B  no enx interface found on this host. Not a DGX, or the internal USB NIC is disabled. Skipping the BIOS part."
+    echo "no enx interface found" >>"$DIR/B-internal-link.txt"; BMC=""
+  fi
+fi
 if [ -n "$BMC" ]; then
   if [ -z "$BMC_USER" ]; then read -r -p "BMC user: " BMC_USER; fi
   if [ -z "${BMC_PASS:-}" ]; then read -r -s -p "BMC password (not saved): " BMC_PASS; echo; fi
@@ -235,6 +286,9 @@ if [ -n "$BMC" ]; then
   [ -s "$DIR/B7-matches.txt" ] || echo "no attribute names match tdx, sgx, tme, seam or expert" >"$DIR/B7-matches.txt"
   unset BMC_PASS CURL
   say "B  BIOS via Redfish       saved"
+  if [ "$LINK_ADDED" = 1 ]; then
+    ip addr del 169.254.0.18/16 dev "$LINK_IF" 2>>"$DIR/B-internal-link.txt" && echo "removed 169.254.0.18/16 from $LINK_IF" >>"$DIR/B-internal-link.txt"
+  fi
 else
   say "B  skipped, no --bmc given. The BIOS settings can be read later from any machine that reaches the BMC."
 fi
