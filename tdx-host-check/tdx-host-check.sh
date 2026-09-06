@@ -31,6 +31,12 @@
 #                       that reaches the BMC network. Password is asked for,
 #                       or taken from BMC_PASS if set. Never saved.
 #   --bmc-user <user>   BMC account. Read access is enough.
+#   --auth-file <path>  File with USERNAME=... and PASSWORD=... lines, mode
+#                       600, so nothing is asked. Default ~/.tdx-bmc.auth if
+#                       that file exists.
+#   --save-auth [path]  After a successful BMC login, write the account and
+#                       password to that file (default ~/.tdx-bmc.auth),
+#                       mode 600, for the next run and for tdx-bios-set.sh.
 #   --system <id>       Redfish system id if not auto-detected (e.g. DGX).
 #   --label <text>      Added to the folder name, e.g. before or after.
 #   --out <dir>         Where to write. Default: current directory.
@@ -45,17 +51,19 @@
 
 set -u
 
-BMC=""; BMC_USER=""; SYSTEM_ID=""; LABEL=""; OUT="."; MODPROBE=1; YES=0
+BMC=""; BMC_USER=""; SYSTEM_ID=""; LABEL=""; OUT="."; MODPROBE=1; YES=0; AUTH=""; SAVE_AUTH=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --bmc) BMC="$2"; shift 2;;
     --bmc-user) BMC_USER="$2"; shift 2;;
+    --auth-file) AUTH="$2"; shift 2;;
+    --save-auth) SAVE_AUTH="${2:-}"; case "$SAVE_AUTH" in ""|--*) SAVE_AUTH="$HOME/.tdx-bmc.auth"; shift;; *) shift 2;; esac;;
     --system) SYSTEM_ID="$2"; shift 2;;
     --label) LABEL="$2"; shift 2;;
     --out) OUT="$2"; shift 2;;
     --no-modprobe) MODPROBE=0; shift;;
     --yes|-y) YES=1; shift;;
-    -h|--help) sed -n '2,44p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
+    -h|--help) sed -n '2,50p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
     *) echo "unknown option: $1" >&2; exit 2;;
   esac
 done
@@ -288,8 +296,15 @@ if [ "$BMC" = "internal" ]; then
   fi
 fi
 if [ -n "$BMC" ]; then
+  [ -z "$AUTH" ] && [ -r "$HOME/.tdx-bmc.auth" ] && AUTH="$HOME/.tdx-bmc.auth"
+  if [ -n "$AUTH" ] && [ -r "$AUTH" ]; then
+    # parse rather than source: in zsh USERNAME is a read-only builtin
+    [ -z "$BMC_USER" ] && BMC_USER=$(sed -n 's/^USERNAME=//p' "$AUTH" | head -1 | tr -d '\r')
+    [ -z "${BMC_PASS:-}" ] && BMC_PASS=$(sed -n 's/^PASSWORD=//p' "$AUTH" | head -1 | tr -d '\r')
+    say "B  credentials from $AUTH for user ${BMC_USER:-?}"
+  fi
   if [ -z "$BMC_USER" ]; then read -r -p "BMC user: " BMC_USER; fi
-  if [ -z "${BMC_PASS:-}" ]; then read -r -s -p "BMC password (not saved): " BMC_PASS; echo; fi
+  if [ -z "${BMC_PASS:-}" ]; then read -r -s -p "BMC password (not saved unless --save-auth): " BMC_PASS; echo; fi
   CURL=(curl -skL --compressed --max-time 60 -u "$BMC_USER:$BMC_PASS")
   # The AMI BMC serves the attribute registry gzip-compressed whatever the
   # request says, so ungzip when the magic bytes say so.
@@ -303,7 +318,10 @@ if [ -n "$BMC" ]; then
   case "$code" in
     401|403) say "B  the BMC at $BMC rejected the login for user $BMC_USER (HTTP $code). Check the account and password. The BIOS files below will only contain that error.";;
     000) say "B  no HTTPS answer from $BMC. Check the address and the route.";;
-    2*) say "B  logged in to the BMC at $BMC as $BMC_USER";;
+    2*) say "B  logged in to the BMC at $BMC as $BMC_USER"
+        if [ -n "$SAVE_AUTH" ]; then
+          umask 077; printf 'USERNAME=%s\nPASSWORD=%s\n' "$BMC_USER" "$BMC_PASS" >"$SAVE_AUTH" && chmod 600 "$SAVE_AUTH" && say "B  saved the BMC login to $SAVE_AUTH (mode 600)"
+        fi;;
     *) say "B  the BMC at $BMC answered HTTP $code to the Systems request";;
   esac
   jget /redfish/v1/Systems >"$DIR/B0-systems.json"

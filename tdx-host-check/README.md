@@ -1,8 +1,8 @@
 # tdx-host-check
 
-One script that reads, without changing anything, whether an Intel host can carry a confidential virtual machine, and packs the evidence into a zip.
+Two scripts. `tdx-host-check.sh` reads, without changing anything, whether an Intel host can carry a confidential virtual machine, and packs the evidence into a zip. `tdx-bios-set.sh` stages the BIOS settings for TDX over Redfish, for the node to apply at its next boot.
 
-It answers, from the operating system:
+The check script answers, from the operating system:
 
 - what the NVIDIA driver reports as host and GPU confidential computing capability (`nvidia-smi conf-compute -q`)
 - what the processor advertises (`/proc/cpuinfo` flags, CPUID leaf 7 and leaf 0x12 for SGX)
@@ -34,6 +34,44 @@ Or with the repository: `git clone https://github.com/simonjaneck/scripts.git &&
 Output is a folder and a zip next to it, named `tdx-host-check-<host>-<label>-<timestamp>`. Send the zip.
 
 `summary.txt` inside carries the decoded reading. `run.log` carries what the script printed. Every other file is the raw output of one command, with the command on its first line.
+
+## BMC login, once
+
+Both scripts read the BMC account from a file with two lines, mode 600:
+
+```
+USERNAME=admin
+PASSWORD=secret
+```
+
+Create it by hand:
+
+```bash
+umask 077; printf 'USERNAME=%s\nPASSWORD=%s\n' admin 'secret' > ~/.tdx-bmc.auth
+```
+
+Or let the check script write it after the first successful login: `sudo ./tdx-host-check.sh --bmc internal --bmc-user admin --save-auth`. Both scripts use `~/.tdx-bmc.auth` by default when it exists, or the path given with `--auth-file`. Under `sudo` the home directory is root's, so the file lands in `/root/.tdx-bmc.auth` and is read from there. Without a file, the scripts ask for the password, or take it from `BMC_PASS`. The password is never written to the output folder.
+
+## Staging the settings: tdx-bios-set.sh
+
+The BMC's BIOS resource has a pending-settings object, `Systems/<id>/Bios/SD`. Writing to it stages values that the firmware applies at the next boot. The script does that for the TDX set and nothing else.
+
+```bash
+sudo ./tdx-bios-set.sh --bmc internal --show                # current and pending values, read-only
+sudo ./tdx-bios-set.sh --bmc internal --enable --dry-run    # print the request, send nothing
+sudo ./tdx-bios-set.sh --bmc internal --enable              # stage TME, TME-MT, SGX, TDX, SEAM loader on, integrity off, key split 1
+sudo ./tdx-bios-set.sh --bmc internal --enable --reboot     # and send a graceful restart through the BMC, after asking
+sudo ./tdx-bios-set.sh --bmc internal --disable             # stage the revert
+sudo ./tdx-bios-set.sh --bmc internal --set PrmSgxSize=512M # one attribute of your choice
+```
+
+What to know before using it:
+
+- **A reboot is required.** These settings are programmed by the firmware during POST. Nothing changes until the node restarts, and the first boot after enabling memory encryption and SGX takes several minutes longer than usual. Drain the node first.
+- **No BIOS screen and no expert mode.** The attributes are exposed over Redfish on DGX H100 SBIOS 01.06.07 regardless of the setup menu.
+- **Every run saves** the settings before, the request, the BMC's answer and the pending settings after, zipped. `--show` and `--dry-run` change nothing.
+- **Revert** with `--disable` and another reboot. If the node will not boot, the BMC's `Bios.ResetBios` action restores firmware defaults.
+- **Attribute names** are the DGX SBIOS ones: `EnableTme`, `EnableMktme`, `EnableGlobalIntegrity`, `EnableSgx`, `PrmSgxSize`, `EnableTdx`, `EnableTdxSeamldr`, `KeySplit`. Run `--show` first on a different firmware and check they exist.
 
 ## What it needs
 
