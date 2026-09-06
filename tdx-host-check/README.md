@@ -14,7 +14,17 @@ and, if a BMC address is given, it reads the BIOS settings and the BIOS attribut
 
 Written for DGX H100 class systems with 4th generation Xeon hosts, where the question is whether TDX can be turned on at all. It runs on any Intel Linux host.
 
-## Run
+## Run everything with one line
+
+`run.sh` fetches both scripts, runs the read-only check over the internal BMC link, shows the current and pending BIOS settings, and puts every zip in one folder. It asks for the BMC login once and offers to save it.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/simonjaneck/scripts/main/tdx-host-check/run.sh | sudo bash
+```
+
+Options after `bash -s --`: `--stage enable` or `--stage disable` to continue into `tdx-bios-set.sh`, which checks the request against the firmware registry and asks before sending; `--reboot` to offer the restart afterwards; `--no-bmc` for part A only; `--bmc <host>` for a BMC address instead of the internal link; `--ref <commit>` to pin a version; `--local` to use scripts already next to it; `--yes` to answer every question. Output lands in `/tmp/tdx-host-check-<date>/`.
+
+## Run the check on its own
 
 Fetch the one file and run it. No checkout needed.
 
