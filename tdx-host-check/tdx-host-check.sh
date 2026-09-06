@@ -290,8 +290,14 @@ fi
 if [ -n "$BMC" ]; then
   if [ -z "$BMC_USER" ]; then read -r -p "BMC user: " BMC_USER; fi
   if [ -z "${BMC_PASS:-}" ]; then read -r -s -p "BMC password (not saved): " BMC_PASS; echo; fi
-  CURL=(curl -skL --max-time 30 -u "$BMC_USER:$BMC_PASS")
-  jget() { "${CURL[@]}" "https://$BMC$1" | python3 -m json.tool 2>/dev/null; }
+  CURL=(curl -skL --compressed --max-time 60 -u "$BMC_USER:$BMC_PASS")
+  # The AMI BMC serves the attribute registry gzip-compressed whatever the
+  # request says, so ungzip when the magic bytes say so.
+  jget() {
+    "${CURL[@]}" "https://$BMC$1" -o "$DIR/.raw" 2>/dev/null
+    if head -c 2 "$DIR/.raw" 2>/dev/null | od -An -tx1 | grep -q '1f 8b'; then gunzip -c "$DIR/.raw" 2>/dev/null; else cat "$DIR/.raw"; fi | python3 -m json.tool 2>/dev/null
+    rm -f "$DIR/.raw"
+  }
   code=$("${CURL[@]}" -o /dev/null -w '%{http_code}' "https://$BMC/redfish/v1/Systems")
   echo "GET /redfish/v1/Systems as $BMC_USER: HTTP $code" >>"$DIR/B-internal-link.txt"
   case "$code" in
