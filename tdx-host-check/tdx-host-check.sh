@@ -292,6 +292,14 @@ if [ -n "$BMC" ]; then
   if [ -z "${BMC_PASS:-}" ]; then read -r -s -p "BMC password (not saved): " BMC_PASS; echo; fi
   CURL=(curl -sk --max-time 30 -u "$BMC_USER:$BMC_PASS")
   jget() { "${CURL[@]}" "https://$BMC$1" | python3 -m json.tool 2>/dev/null; }
+  code=$("${CURL[@]}" -o /dev/null -w '%{http_code}' "https://$BMC/redfish/v1/Systems/")
+  echo "GET /redfish/v1/Systems/ as $BMC_USER: HTTP $code" >>"$DIR/B-internal-link.txt"
+  case "$code" in
+    401|403) say "B  the BMC at $BMC rejected the login for user $BMC_USER (HTTP $code). Check the account and password. The BIOS files below will only contain that error.";;
+    000) say "B  no HTTPS answer from $BMC. Check the address and the route.";;
+    2*) say "B  logged in to the BMC at $BMC as $BMC_USER";;
+    *) say "B  the BMC at $BMC answered HTTP $code to the Systems request";;
+  esac
   jget /redfish/v1/Systems/ >"$DIR/B0-systems.json"
   if [ -z "$SYSTEM_ID" ]; then
     SYSTEM_ID=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['Members'][0]['@odata.id'].rstrip('/').split('/')[-1])" "$DIR/B0-systems.json" 2>/dev/null)
