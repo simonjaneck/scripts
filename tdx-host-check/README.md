@@ -69,7 +69,7 @@ The BMC's BIOS resource has a pending-settings object, `Systems/<id>/Bios/SD`. W
 ```bash
 sudo ./tdx-bios-set.sh --bmc internal --show                # current and pending values, read-only
 sudo ./tdx-bios-set.sh --bmc internal --enable --dry-run    # print the request, send nothing
-sudo ./tdx-bios-set.sh --bmc internal --enable              # stage TME, TME-MT, SGX, TDX, SEAM loader on, integrity off, key split 1
+sudo ./tdx-bios-set.sh --bmc internal --enable              # stage TME, TME-MT, SGX, TDX, SEAM loader on, integrity off, PRM 256M, key split 1
 sudo ./tdx-bios-set.sh --bmc internal --enable --reboot     # and send a graceful restart through the BMC, after asking
 sudo ./tdx-bios-set.sh --bmc internal --disable             # stage the revert
 sudo ./tdx-bios-set.sh --bmc internal --set PrmSgxSize=512M # one attribute of your choice

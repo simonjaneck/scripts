@@ -228,7 +228,7 @@ TME_EN=""; KEYID_BITS=""; TDX_KEYS=""; MAX_KEYS=""
 say "A6 memory encryption MSR saved"
 
 # ------------------------------------------------ B  BIOS settings via BMC
-LINK_IF=""; LINK_ADDED=0; LINK_KEEP=0
+LINK_IF=""; LINK_ADDED=0; LINK_KEEP=0; B_SKIPPED=0
 confirm() {  # confirm <question> -> 0 for yes. --yes answers yes to everything.
   [ "$YES" = 1 ] && return 0
   local a; read -r -p "$1 [y/N] " a </dev/tty; case "$a" in y|Y|yes|YES) return 0;; *) return 1;; esac
@@ -243,7 +243,7 @@ if [ "$BMC" = "internal" ]; then
   for i in /sys/class/net/*; do
     n=$(basename "$i"); [ "$n" = lo ] && continue
     dev=$(readlink -f "$i/device" 2>/dev/null)
-    case "$n:$dev" in enx*|*usb*|*:*/usb*) CANDS="$CANDS $n";; esac
+    case "$n:$dev" in enx*|*usb*) CANDS="$CANDS $n";; esac
   done
   {
     echo "--- USB network interfaces found:${CANDS:-none}"
@@ -262,7 +262,7 @@ if [ "$BMC" = "internal" ]; then
   elif [ -z "$CANDS" ]; then
     say "B  no USB network interface found. Not a DGX, or the internal BMC NIC is disabled in the BMC. Skipping the BIOS part."
     say "   The list of interfaces is saved in B-internal-link.txt. Part B can be run from another machine with --bmc <bmc-address>."
-    BMC=""
+    BMC=""; B_SKIPPED=1
   else
     # prefer an interface with carrier, else the first candidate
     for n in $CANDS; do [ "$(cat /sys/class/net/$n/carrier 2>/dev/null)" = 1 ] && { LINK_IF="$n"; break; }; done
@@ -280,7 +280,7 @@ if [ "$BMC" = "internal" ]; then
         say "B  could not add the address to $LINK_IF, see B-internal-link.txt"
       fi
     else
-      say "B  left as is. Skipping the BIOS part."; LINK_IF=""; BMC=""
+      say "B  left as is. Skipping the BIOS part."; LINK_IF=""; BMC=""; B_SKIPPED=1
     fi
   fi
   if [ -n "$LINK_IF" ] && [ -n "$BMC" ]; then
@@ -299,9 +299,14 @@ if [ -n "$BMC" ]; then
   [ -z "$AUTH" ] && [ -r "$HOME/.tdx-bmc.auth" ] && AUTH="$HOME/.tdx-bmc.auth"
   if [ -n "$AUTH" ] && [ -r "$AUTH" ]; then
     # parse rather than source: in zsh USERNAME is a read-only builtin
-    [ -z "$BMC_USER" ] && BMC_USER=$(sed -n 's/^USERNAME=//p' "$AUTH" | head -1 | tr -d '\r')
-    [ -z "${BMC_PASS:-}" ] && BMC_PASS=$(sed -n 's/^PASSWORD=//p' "$AUTH" | head -1 | tr -d '\r')
-    say "B  credentials from $AUTH for user ${BMC_USER:-?}"
+    FU=$(sed -n 's/^USERNAME=//p' "$AUTH" | head -1 | tr -d '\r')
+    if [ -n "$BMC_USER" ] && [ "$BMC_USER" != "$FU" ]; then
+      say "B  $AUTH is for user $FU, not $BMC_USER. Ignoring the file."
+    else
+      BMC_USER="$FU"
+      [ -z "${BMC_PASS:-}" ] && BMC_PASS=$(sed -n 's/^PASSWORD=//p' "$AUTH" | head -1 | tr -d '\r')
+      say "B  credentials from $AUTH for user ${BMC_USER:-?}"
+    fi
   fi
   if [ -z "$BMC_USER" ]; then read -r -p "BMC user: " BMC_USER; fi
   if [ -z "${BMC_PASS:-}" ]; then read -r -s -p "BMC password (not saved unless --save-auth): " BMC_PASS; echo; fi
@@ -320,7 +325,7 @@ if [ -n "$BMC" ]; then
     000) say "B  no HTTPS answer from $BMC. Check the address and the route.";;
     2*) say "B  logged in to the BMC at $BMC as $BMC_USER"
         if [ -n "$SAVE_AUTH" ]; then
-          umask 077; printf 'USERNAME=%s\nPASSWORD=%s\n' "$BMC_USER" "$BMC_PASS" >"$SAVE_AUTH" && chmod 600 "$SAVE_AUTH" && say "B  saved the BMC login to $SAVE_AUTH (mode 600)"
+          umask 077; mkdir -p "$(dirname "$SAVE_AUTH")"; printf 'USERNAME=%s\nPASSWORD=%s\n' "$BMC_USER" "$BMC_PASS" >"$SAVE_AUTH" && chmod 600 "$SAVE_AUTH" && say "B  saved the BMC login to $SAVE_AUTH (mode 600)"
         fi;;
     *) say "B  the BMC at $BMC answered HTTP $code to the Systems request";;
   esac
@@ -356,7 +361,7 @@ if [ -n "$BMC" ]; then
     echo "kept 169.254.0.18/16 on $LINK_IF at the user's request" >>"$DIR/B-internal-link.txt"
     say "B  kept 169.254.0.18/16 on $LINK_IF. It does not survive a reboot unless made persistent."
   fi
-else
+elif [ "$B_SKIPPED" = 0 ]; then
   say "B  skipped, no --bmc given. The BIOS settings can be read later from any machine that reaches the BMC."
 fi
 

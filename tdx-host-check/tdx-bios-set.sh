@@ -19,7 +19,7 @@
 #   --show              Print current and pending values of the TDX related
 #                       attributes. Read-only.
 #   --enable            Stage TME, TME-MT, SGX, TDX, SEAM loader on, memory
-#                       integrity off, key split 1.
+#                       integrity off, SGX PRM size 256M, key split 1.
 #   --disable           Stage all of them back to Disabled, key split 1.
 #   --set NAME=VALUE    Stage one attribute. Repeatable. For values the two
 #                       presets do not cover, e.g. --set PrmSgxSize=512M
@@ -59,10 +59,8 @@ set -u
 ACTION=""; SETS=(); BMC=""; BMC_USER=""; AUTH=""; SYSTEM_ID=""; REBOOT=0; DRY=0; OUT="."; YES=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --show) ACTION=show; shift;;
-    --enable) ACTION=enable; shift;;
-    --disable) ACTION=disable; shift;;
-    --set) SETS+=("$2"); ACTION=${ACTION:-set}; shift 2;;
+    --enable|--disable|--show) [ -z "$ACTION" ] || { echo "only one of --show, --enable, --disable or --set" >&2; exit 2; }; ACTION=${1#--}; shift;;
+    --set) SETS+=("$2"); [ -z "$ACTION" ] || [ "$ACTION" = set ] || { echo "--set cannot be combined with --$ACTION" >&2; exit 2; }; ACTION="set"; shift 2;;
     --bmc) BMC="$2"; shift 2;;
     --bmc-user) BMC_USER="$2"; shift 2;;
     --auth-file) AUTH="$2"; shift 2;;
@@ -92,9 +90,13 @@ confirm() { [ "$YES" = 1 ] && return 0; local a; read -r -p "$1 [y/N] " a </dev/
 if [ -n "$AUTH" ]; then
   [ -r "$AUTH" ] || { echo "cannot read $AUTH" >&2; exit 1; }
   # parse rather than source: in zsh USERNAME is a read-only builtin
-  BMC_USER=$(sed -n 's/^USERNAME=//p' "$AUTH" | head -1 | tr -d '\r')
-  BMC_PASS=$(sed -n 's/^PASSWORD=//p' "$AUTH" | head -1 | tr -d '\r')
-  [ -n "$BMC_USER" ] && [ -n "$BMC_PASS" ] || { echo "$AUTH must contain USERNAME= and PASSWORD= lines" >&2; exit 1; }
+  FU=$(sed -n 's/^USERNAME=//p' "$AUTH" | head -1 | tr -d '\r')
+  if [ -n "$BMC_USER" ] && [ "$BMC_USER" != "$FU" ]; then
+    echo "note: $AUTH is for user $FU, not $BMC_USER. Ignoring the file."
+  else
+    BMC_USER="$FU"; BMC_PASS=$(sed -n 's/^PASSWORD=//p' "$AUTH" | head -1 | tr -d '\r')
+    [ -n "$BMC_USER" ] && [ -n "$BMC_PASS" ] || { echo "$AUTH must contain USERNAME= and PASSWORD= lines" >&2; exit 1; }
+  fi
   perm=$(stat -c %a "$AUTH" 2>/dev/null); [ "$perm" = 600 ] || say "note: $AUTH has mode $perm, consider chmod 600"
 fi
 [ -n "$BMC_USER" ] || read -r -p "BMC user: " BMC_USER
@@ -107,7 +109,7 @@ if [ "$BMC" = "internal" ]; then
   for i in /sys/class/net/*; do
     n=$(basename "$i"); [ "$n" = lo ] && continue
     dev=$(readlink -f "$i/device" 2>/dev/null)
-    case "$n:$dev" in enx*|*usb*|*:*/usb*) CANDS="$CANDS $n";; esac
+    case "$n:$dev" in enx*|*usb*) CANDS="$CANDS $n";; esac
   done
   LINK_IF=""
   for n in $CANDS; do ip -4 -o addr show dev "$n" 2>/dev/null | grep -q ' 169\.254\.' && { LINK_IF="$n"; break; }; done
@@ -117,7 +119,7 @@ if [ "$BMC" = "internal" ]; then
     [ -z "$LINK_IF" ] && LINK_IF=$(echo $CANDS | awk '{print $1}')
     say "the internal link $LINK_IF has no address. Would run: ip link set dev $LINK_IF up; ip addr add 169.254.0.18/16 dev $LINK_IF"
     confirm "Configure $LINK_IF now?" || { say "left as is, nothing done"; exit 1; }
-    ip link set dev "$LINK_IF" up && sleep 2 && ip addr add 169.254.0.18/16 dev "$LINK_IF" || { say "could not configure $LINK_IF"; exit 1; }
+    if ! { ip link set dev "$LINK_IF" up && sleep 2 && ip addr add 169.254.0.18/16 dev "$LINK_IF"; }; then say "could not configure $LINK_IF"; exit 1; fi
   fi
   BMC=169.254.0.17
   say "using $LINK_IF, BMC at $BMC"
@@ -171,7 +173,7 @@ fi
 
 # ------------------------------------------------------------ the request
 case "$ACTION" in
-  enable)  BODY='{"Attributes":{"EnableTme":"Enabled","EnableMktme":"Enabled","EnableGlobalIntegrity":"Disabled","EnableSgx":"Enabled","EnableTdx":"Enabled","EnableTdxSeamldr":"Enabled","KeySplit":1}}';;
+  enable)  BODY='{"Attributes":{"EnableTme":"Enabled","EnableMktme":"Enabled","EnableGlobalIntegrity":"Disabled","EnableSgx":"Enabled","PrmSgxSize":"256M","EnableTdx":"Enabled","EnableTdxSeamldr":"Enabled","KeySplit":1}}';;
   disable) BODY='{"Attributes":{"EnableTme":"Disabled","EnableMktme":"Disabled","EnableGlobalIntegrity":"Disabled","EnableSgx":"Disabled","EnableTdx":"Disabled","EnableTdxSeamldr":"Disabled","KeySplit":1}}';;
   set)     BODY=$(python3 - "${SETS[@]}" <<'PY'
 import json, sys

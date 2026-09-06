@@ -52,7 +52,7 @@ while [ $# -gt 0 ]; do
     --out) OUT="$2"; shift 2;;
     --label) LABEL="$2"; shift 2;;
     --yes|-y) YES=1; shift;;
-    -h|--help) sed -n '2,36p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'; exit 0;;
+    -h|--help) sed -n '2,36p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//' | grep . || echo "run.sh: fetch and run the host check. Options are listed in the README at https://github.com/simonjaneck/scripts/tree/main/tdx-host-check"; exit 0;;
     *) echo "unknown option: $1" >&2; exit 2;;
   esac
 done
