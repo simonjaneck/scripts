@@ -113,7 +113,7 @@ say "A1 identity              saved"
 # ------------------------------------------------- A2 what the GPU driver sees
 if have nvidia-smi; then
   run A2-conf-compute.txt nvidia-smi conf-compute -q
-  runsh A2-conf-compute-ready.txt "nvidia-smi conf-compute -grs 2>&1; nvidia-smi conf-compute -gcs 2>&1"
+  run A2-conf-compute-ready.txt nvidia-smi conf-compute -grs
 else
   echo "nvidia-smi not installed, no GPU driver view" >"$DIR/A2-conf-compute.txt"
 fi
@@ -139,7 +139,10 @@ say "A3 processor flags       saved"
     journalctl -k -b 2>/dev/null | grep -i -E '\bsgx\b|\btdx\b|\btme\b|tme-mt|memory encryption|\bseam\b|virt/tdx|mktme'
   fi
 } >"$DIR/A4-dmesg.txt" 2>&1
-[ -s "$DIR/A4-dmesg.txt" ] || echo "no kernel messages about sgx, tdx or tme (or dmesg not readable without root)" >"$DIR/A4-dmesg.txt"
+if [ ! -s "$DIR/A4-dmesg.txt" ]; then
+  if [ "$(id -u)" -eq 0 ]; then echo "no kernel messages about sgx, tdx or tme. Expected while they are off in firmware." >"$DIR/A4-dmesg.txt"
+  else echo "no kernel messages about sgx, tdx or tme, but dmesg is not readable without root" >"$DIR/A4-dmesg.txt"; fi
+fi
 say "A4 kernel messages       saved"
 
 # ------------------------------------------- A5 SGX capability, CPUID leaves
