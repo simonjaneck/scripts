@@ -24,8 +24,9 @@
 #   --bmc internal      Read the BIOS over the DGX internal host-to-BMC USB
 #                       network interface (enx..., BMC at 169.254.0.17), from
 #                       the node itself. If the interface has no link-local
-#                       address yet, 169.254.0.18/16 is added for the run and
-#                       removed afterwards. The one host change this makes.
+#                       address yet, the script shows what it found and asks
+#                       before bringing it up and adding 169.254.0.18/16. At
+#                       the end it asks whether to keep or remove the address.
 #   --bmc <host>        BMC address for the Redfish part, from any machine
 #                       that reaches the BMC network. Password is asked for,
 #                       or taken from BMC_PASS if set. Never saved.
@@ -34,6 +35,7 @@
 #   --label <text>      Added to the folder name, e.g. before or after.
 #   --out <dir>         Where to write. Default: current directory.
 #   --no-modprobe       Do not load the msr or cpuid modules.
+#   --yes, -y           Answer yes to the questions (configure and keep).
 #   -h, --help          This text.
 #
 # Exit code is 0 when the run completed, whatever the findings. The
@@ -43,7 +45,7 @@
 
 set -u
 
-BMC=""; BMC_USER=""; SYSTEM_ID=""; LABEL=""; OUT="."; MODPROBE=1
+BMC=""; BMC_USER=""; SYSTEM_ID=""; LABEL=""; OUT="."; MODPROBE=1; YES=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --bmc) BMC="$2"; shift 2;;
@@ -52,7 +54,8 @@ while [ $# -gt 0 ]; do
     --label) LABEL="$2"; shift 2;;
     --out) OUT="$2"; shift 2;;
     --no-modprobe) MODPROBE=0; shift;;
-    -h|--help) sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
+    --yes|-y) YES=1; shift;;
+    -h|--help) sed -n '2,44p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
     *) echo "unknown option: $1" >&2; exit 2;;
   esac
 done
@@ -214,46 +217,71 @@ TME_EN=""; KEYID_BITS=""; TDX_KEYS=""; MAX_KEYS=""
 say "A6 memory encryption MSR saved"
 
 # ------------------------------------------------ B  BIOS settings via BMC
-LINK_IF=""; LINK_ADDED=0
+LINK_IF=""; LINK_ADDED=0; LINK_KEEP=0
+confirm() {  # confirm <question> -> 0 for yes. --yes answers yes to everything.
+  [ "$YES" = 1 ] && return 0
+  local a; read -r -p "$1 [y/N] " a </dev/tty; case "$a" in y|Y|yes|YES) return 0;; *) return 1;; esac
+}
 if [ "$BMC" = "internal" ]; then
-  # DGX systems expose the BMC on an internal USB network interface named
-  # enx<mac>, with the BMC preconfigured at 169.254.0.17. See the DGX H100 and
-  # B200 user guides, Redfish APIs Support, Connectivity Between the Host and BMC.
+  # DGX systems expose the BMC on an internal USB network interface, usually
+  # named enx<mac>, with the BMC preconfigured at 169.254.0.17. See the DGX
+  # H100 and B200 user guides, Redfish APIs Support, Connectivity Between the
+  # Host and BMC. The host side needs an address on 169.254.0.0/16, which the
+  # system does not ship with, so this part configures it after asking.
+  CANDS=""
+  for i in /sys/class/net/*; do
+    n=$(basename "$i"); [ "$n" = lo ] && continue
+    dev=$(readlink -f "$i/device" 2>/dev/null)
+    case "$n:$dev" in enx*|*usb*|*:*/usb*) CANDS="$CANDS $n";; esac
+  done
   {
-    echo "--- candidate interfaces"
-    for i in /sys/class/net/enx*; do
-      [ -e "$i" ] || continue
-      n=$(basename "$i"); drv=$(readlink "$i/device/driver" 2>/dev/null | xargs -r basename)
-      echo "$n driver=${drv:-?} carrier=$(cat "$i/carrier" 2>/dev/null || echo ?) addr=$(ip -4 -o addr show dev "$n" 2>/dev/null | awk '{print $4}' | tr '\n' ' ')"
+    echo "--- USB network interfaces found:${CANDS:-none}"
+    for n in $CANDS; do
+      drv=$(readlink "/sys/class/net/$n/device/driver" 2>/dev/null | xargs -r basename)
+      echo "$n driver=${drv:-?} state=$(cat /sys/class/net/$n/operstate 2>/dev/null) carrier=$(cat /sys/class/net/$n/carrier 2>/dev/null || echo ?) mac=$(cat /sys/class/net/$n/address 2>/dev/null) addr=$(ip -4 -o addr show dev "$n" 2>/dev/null | awk '{print $4}' | tr '\n' ' ')"
     done
+    echo "--- all interfaces"; ip -br link 2>/dev/null; ip -br -4 addr 2>/dev/null
   } >"$DIR/B-internal-link.txt" 2>&1
-  for i in /sys/class/net/enx*; do
-    [ -e "$i" ] || continue; n=$(basename "$i")
+  say "B  internal link candidates:${CANDS:-none}"
+  for n in $CANDS; do
     if ip -4 -o addr show dev "$n" 2>/dev/null | grep -q ' 169\.254\.'; then LINK_IF="$n"; break; fi
   done
-  if [ -z "$LINK_IF" ]; then
-    for i in /sys/class/net/enx*; do
-      [ -e "$i" ] || continue; n=$(basename "$i")
-      if [ "$(cat "$i/carrier" 2>/dev/null)" = "1" ] || [ "$(cat "$i/operstate" 2>/dev/null)" = "up" ]; then LINK_IF="$n"; break; fi
-    done
-    [ -z "$LINK_IF" ] && for i in /sys/class/net/enx*; do [ -e "$i" ] && { LINK_IF=$(basename "$i"); break; }; done
-    if [ -n "$LINK_IF" ]; then
+  if [ -n "$LINK_IF" ]; then
+    say "B  $LINK_IF already has a link-local address, using it as is"
+  elif [ -z "$CANDS" ]; then
+    say "B  no USB network interface found. Not a DGX, or the internal BMC NIC is disabled in the BMC. Skipping the BIOS part."
+    say "   The list of interfaces is saved in B-internal-link.txt. Part B can be run from another machine with --bmc <bmc-address>."
+    BMC=""
+  else
+    # prefer an interface with carrier, else the first candidate
+    for n in $CANDS; do [ "$(cat /sys/class/net/$n/carrier 2>/dev/null)" = 1 ] && { LINK_IF="$n"; break; }; done
+    [ -z "$LINK_IF" ] && LINK_IF=$(echo $CANDS | awk '{print $1}')
+    say "B  the internal link $LINK_IF is not configured."
+    say "   To reach the BMC the script would run:  ip link set dev $LINK_IF up  and  ip addr add 169.254.0.18/16 dev $LINK_IF"
+    say "   That is a host-side address on the internal USB link only. Nothing else changes."
+    if confirm "   Configure $LINK_IF now?"; then
       ip link set dev "$LINK_IF" up 2>>"$DIR/B-internal-link.txt"
+      sleep 2
       if ip addr add 169.254.0.18/16 dev "$LINK_IF" 2>>"$DIR/B-internal-link.txt"; then
-        LINK_ADDED=1; echo "added 169.254.0.18/16 to $LINK_IF for this run" >>"$DIR/B-internal-link.txt"
+        LINK_ADDED=1; echo "added 169.254.0.18/16 to $LINK_IF" >>"$DIR/B-internal-link.txt"
+        if confirm "   Keep the address after the run, so the link stays usable? (no = remove it at the end)"; then LINK_KEEP=1; fi
+      else
+        say "B  could not add the address to $LINK_IF, see B-internal-link.txt"
       fi
+    else
+      say "B  left as is. Skipping the BIOS part."; LINK_IF=""; BMC=""
     fi
   fi
-  if [ -n "$LINK_IF" ]; then
+  if [ -n "$LINK_IF" ] && [ -n "$BMC" ]; then
     BMC="169.254.0.17"
     echo "using $LINK_IF, BMC at $BMC" >>"$DIR/B-internal-link.txt"
-    say "B  internal link: $LINK_IF, BMC at $BMC"
-    if ! curl -sk --max-time 10 -o /dev/null "https://$BMC/redfish/v1/" 2>>"$DIR/B-internal-link.txt"; then
+    ip -4 -o addr show dev "$LINK_IF" >>"$DIR/B-internal-link.txt" 2>&1
+    if curl -sk --max-time 10 -o /dev/null "https://$BMC/redfish/v1/" 2>>"$DIR/B-internal-link.txt"; then
+      say "B  BMC answers at $BMC over $LINK_IF"
+    else
       say "B  the BMC does not answer at $BMC over $LINK_IF. Continuing, the Redfish files will show the error."
+      say "   If this persists: check in the BMC web UI that the host USB interface is enabled, or run part B with --bmc <bmc-address> from another machine."
     fi
-  else
-    say "B  no enx interface found on this host. Not a DGX, or the internal USB NIC is disabled. Skipping the BIOS part."
-    echo "no enx interface found" >>"$DIR/B-internal-link.txt"; BMC=""
   fi
 fi
 if [ -n "$BMC" ]; then
@@ -286,8 +314,12 @@ if [ -n "$BMC" ]; then
   [ -s "$DIR/B7-matches.txt" ] || echo "no attribute names match tdx, sgx, tme, seam or expert" >"$DIR/B7-matches.txt"
   unset BMC_PASS CURL
   say "B  BIOS via Redfish       saved"
-  if [ "$LINK_ADDED" = 1 ]; then
+  if [ "$LINK_ADDED" = 1 ] && [ "$LINK_KEEP" = 0 ]; then
     ip addr del 169.254.0.18/16 dev "$LINK_IF" 2>>"$DIR/B-internal-link.txt" && echo "removed 169.254.0.18/16 from $LINK_IF" >>"$DIR/B-internal-link.txt"
+    say "B  removed 169.254.0.18/16 from $LINK_IF again"
+  elif [ "$LINK_ADDED" = 1 ]; then
+    echo "kept 169.254.0.18/16 on $LINK_IF at the user's request" >>"$DIR/B-internal-link.txt"
+    say "B  kept 169.254.0.18/16 on $LINK_IF. It does not survive a reboot unless made persistent."
   fi
 else
   say "B  skipped, no --bmc given. The BIOS settings can be read later from any machine that reaches the BMC."
